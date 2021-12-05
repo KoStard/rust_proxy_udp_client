@@ -1,7 +1,8 @@
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{repeat, Write};
 use std::net::{SocketAddr, UdpSocket};
 use std::ops::Add;
+use std::time::Duration;
 use clap::{App, Arg};
 
 const CONNECT_MESSAGE: &'static str = "Connect";
@@ -9,6 +10,7 @@ const ACCEPT_RESPONSE: &'static str = "Accept";
 const REQUEST_PREFIX: &'static str = "GET:";
 const BYE_MESSAGE: &'static str = "BYE";
 const BYE_RESPONSE: &'static str = "BYE";
+const REPEAT_REQUEST_PREFIX: &'static str = "REPEAT_BATCH:";
 const BUFFER_SIZE: usize = 10_000;
 
 fn main() {
@@ -44,9 +46,11 @@ fn main() {
     ];
     let socket = UdpSocket::bind(&possible_addresses[..])
         .expect("Failed to bind to the UDP socket");
+    // TODO increase in prod
+    socket.set_read_timeout(Some(Duration::new(5, 0)));
 
     send_message(CONNECT_MESSAGE.to_owned(), &socket, &proxy_server_address);
-    let response = response_to_string(wait_for_response_with_attempts(&socket, &proxy_server_address));
+    let response = response_to_string(wait_for_response_with_attempts(&socket, &proxy_server_address).unwrap());
     assert_eq!(response, ACCEPT_RESPONSE);
 
     send_message(generate_request_from_url(url), &socket, &proxy_server_address);
@@ -56,10 +60,11 @@ fn main() {
         .write(main_response.as_slice());
 
     send_message(BYE_MESSAGE.to_owned(), &socket, &proxy_server_address);
-    assert_eq!(response_to_string(wait_for_response_with_attempts(&socket, &proxy_server_address)), BYE_RESPONSE);
+    assert_eq!(response_to_string(wait_for_response_with_attempts(&socket, &proxy_server_address).unwrap()), BYE_RESPONSE);
 }
 
 fn send_message(message: String, socket: &UdpSocket, destination: &SocketAddr) {
+    println!("Sending {}, {}", message, destination);
     // Maybe we can retry in case of failures
     socket.send_to(message.as_bytes(), destination)
         .expect("Failed sending a message to the proxy");
@@ -70,12 +75,12 @@ fn generate_request_from_url(url: &str) -> String {
         .add(url)
 }
 
-fn wait_for_response_with_attempts<'a>(socket: &'a UdpSocket, proxy_addr: &'a SocketAddr) -> Vec<u8> {
+fn wait_for_response_with_attempts<'a>(socket: &'a UdpSocket, proxy_addr: &'a SocketAddr) -> Result<Vec<u8>, String> {
     let mut current = 0;
     let max = 100;
     loop {
-        if let Some(resp) = wait_for_response(socket, proxy_addr) {
-            return resp;
+        if let Some(resp) = wait_for_response(socket, proxy_addr)? {
+            return Ok(resp);
         } else {
             current += 1;
             if current > max {
@@ -85,16 +90,16 @@ fn wait_for_response_with_attempts<'a>(socket: &'a UdpSocket, proxy_addr: &'a So
     }
 }
 
-fn wait_for_response<'a>(socket: &'a UdpSocket, proxy_addr: &'a SocketAddr) -> Option<Vec<u8>> {
+fn wait_for_response<'a>(socket: &'a UdpSocket, proxy_addr: &'a SocketAddr) -> Result<Option<Vec<u8>>, String> {
     let mut buffer = [0; BUFFER_SIZE];
     // TODO if the server crashes, the client will block
     let (msg_length, message_source) = socket.recv_from(&mut buffer)
-        .expect("Failed receiving from the proxy");
+        .map_err(|e| format!("Failed receiving message from the socket: {}", e))?;
     if !check_if_same_source(message_source, *proxy_addr) {
         println!("Received message not from the proxy {} {}", message_source, proxy_addr);
-        None
+        Ok(None)
     } else {
-        Some(buffer[..msg_length].to_vec())
+        Ok(Some(buffer[..msg_length].to_vec()))
     }
 }
 
@@ -110,9 +115,29 @@ fn response_to_string(content: Vec<u8>) -> String {
 fn poll_messages(socket: &UdpSocket, destination: &SocketAddr) -> Vec<u8> {
     let mut received_batches: HashMap<u32, Vec<u8>> = HashMap::new();
     let mut expected_overall_count = 0;
+    let mut failures = 0;
+    let mut failures_max = 50;
 
     loop {
-        let current_block = wait_for_response_with_attempts(socket, destination);
+        let current_block_res = wait_for_response_with_attempts(socket, destination);
+        if let Err(e) = current_block_res {
+            // TODO improve the code
+            failures += 1;
+            if failures > failures_max {
+                panic!("Couldn't receive the message after {} retries", failures_max);
+            }
+
+            for i in 0..expected_overall_count {
+                if !received_batches.contains_key(&i) {
+                    println!("Requesting repeat for {}", i);
+                    let repeat_message = String::from(REPEAT_REQUEST_PREFIX)
+                        .add(&i.to_string());
+                    send_message(repeat_message, socket, destination);
+                }
+            }
+            continue;
+        }
+        let current_block = current_block_res.unwrap();
         let (current_index, overall_count, body) = process_the_custom_proxy_protocol(current_block.as_slice());
         if expected_overall_count != 0 && overall_count != expected_overall_count {
             panic!("Got different overall batches count in different batches...");
@@ -123,6 +148,7 @@ fn poll_messages(socket: &UdpSocket, destination: &SocketAddr) -> Vec<u8> {
         }
         received_batches.insert(current_index, body.to_vec());
 
+        println!("{} {}", received_batches.len(), overall_count);
         if received_batches.len() == overall_count.try_into().unwrap() {
             break;
         }
