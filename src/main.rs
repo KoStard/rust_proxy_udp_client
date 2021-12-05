@@ -55,7 +55,8 @@ fn main() {
     std::io::stdout()
         .write(main_response.as_slice());
 
-    send_message("BYE".to_owned(), &socket, &proxy_server_address);
+    send_message(BYE_MESSAGE.to_owned(), &socket, &proxy_server_address);
+    assert_eq!(response_to_string(wait_for_response_with_attempts(&socket, &proxy_server_address)), BYE_RESPONSE);
 }
 
 fn send_message(message: String, socket: &UdpSocket, destination: &SocketAddr) {
@@ -86,6 +87,7 @@ fn wait_for_response_with_attempts<'a>(socket: &'a UdpSocket, proxy_addr: &'a So
 
 fn wait_for_response<'a>(socket: &'a UdpSocket, proxy_addr: &'a SocketAddr) -> Option<Vec<u8>> {
     let mut buffer = [0; BUFFER_SIZE];
+    // TODO if the server crashes, the client will block
     let (msg_length, message_source) = socket.recv_from(&mut buffer)
         .expect("Failed receiving from the proxy");
     if !check_if_same_source(message_source, *proxy_addr) {
@@ -117,7 +119,7 @@ fn poll_messages(socket: &UdpSocket, destination: &SocketAddr) -> Vec<u8> {
         }
         expected_overall_count = overall_count;
         if current_index > overall_count {
-            panic!("Got chuck with bigger current index than the overall count of the batches, something went wrong...");
+            panic!("Got chunk with bigger current index than the overall count of the batches, something went wrong...");
         }
         received_batches.insert(current_index, body.to_vec());
 
