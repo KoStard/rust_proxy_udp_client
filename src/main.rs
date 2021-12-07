@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::io::{repeat, Write};
+use std::fs::File;
+use std::io::Write;
 use std::net::{SocketAddr, UdpSocket};
 use std::ops::Add;
 use std::time::Duration;
@@ -30,9 +31,16 @@ fn main() {
             .help("The target URL you are trying to read from with the proxy")
             .takes_value(true)
             .required(true))
+        .arg(Arg::with_name("target-file")
+            .long("target-file")
+            .short("f")
+            .help("The target file to write the proxy server response into")
+            .takes_value(true)
+            .required(true))
         .get_matches();
     let proxy_server_address_raw = app.value_of("proxy-server").expect("Proxy server not provided");
     let url = app.value_of("url").expect("Destination URL not specified");
+    let target_file_path = app.value_of("target-file").expect("Target file not specified");
 
     let proxy_server_address: SocketAddr = proxy_server_address_raw
         .parse()
@@ -47,20 +55,51 @@ fn main() {
     let socket = UdpSocket::bind(&possible_addresses[..])
         .expect("Failed to bind to the UDP socket");
     // TODO increase in prod
-    socket.set_read_timeout(Some(Duration::new(5, 0)));
+    socket.set_read_timeout(Some(Duration::new(5, 0))).expect("Couldn't set the socket timeout");
 
-    send_message(CONNECT_MESSAGE.to_owned(), &socket, &proxy_server_address);
-    let response = response_to_string(wait_for_response_with_attempts(&socket, &proxy_server_address).unwrap());
-    assert_eq!(response, ACCEPT_RESPONSE);
+    let mut connect_attempts = 0;
+    loop {
+        send_message(CONNECT_MESSAGE.to_owned(), &socket, &proxy_server_address);
+        if let Ok(raw_response) = wait_for_response_with_attempts(&socket, &proxy_server_address) {
+            let response = response_to_string(raw_response);
+            assert_eq!(response, ACCEPT_RESPONSE);
+            break;
+        }
+        println!("Sending connect again...");
+        connect_attempts += 1;
+        if connect_attempts > 5 {
+            panic!("Couldn't connect to the proxy");
+        }
+    }
 
-    send_message(generate_request_from_url(url), &socket, &proxy_server_address);
+    let mut file = File::create(target_file_path).expect("Couldn't create the file");
+    let mut request_send_attempts = 0;
+    loop {
+        send_message(generate_request_from_url(url), &socket, &proxy_server_address);
+        if let Some(main_response) = poll_messages(&socket, &proxy_server_address) {
+            file.write_all(main_response.as_slice()).expect("Couldn't write to the file");
+            break;
+        }
+        println!("Sending the URL again...");
+        request_send_attempts += 1;
+        if request_send_attempts > 3 {
+            panic!("Couldn't receive any response from the proxy");
+        }
+    }
 
-    let main_response = poll_messages(&socket, &proxy_server_address);
-    std::io::stdout()
-        .write(main_response.as_slice());
 
-    send_message(BYE_MESSAGE.to_owned(), &socket, &proxy_server_address);
-    assert_eq!(response_to_string(wait_for_response_with_attempts(&socket, &proxy_server_address).unwrap()), BYE_RESPONSE);
+    let mut bye_attempts = 0;
+    loop {
+        send_message(BYE_MESSAGE.to_owned(), &socket, &proxy_server_address);
+        if let Ok(raw_response) = wait_for_response_with_attempts(&socket, &proxy_server_address) {
+            assert_eq!(response_to_string(raw_response), BYE_RESPONSE);
+            break;
+        }
+        bye_attempts += 1;
+        if bye_attempts > 3 {
+            panic!("Couldn't receive any bye from the proxy :(");
+        }
+    }
 }
 
 fn send_message(message: String, socket: &UdpSocket, destination: &SocketAddr) {
@@ -92,7 +131,6 @@ fn wait_for_response_with_attempts<'a>(socket: &'a UdpSocket, proxy_addr: &'a So
 
 fn wait_for_response<'a>(socket: &'a UdpSocket, proxy_addr: &'a SocketAddr) -> Result<Option<Vec<u8>>, String> {
     let mut buffer = [0; BUFFER_SIZE];
-    // TODO if the server crashes, the client will block
     let (msg_length, message_source) = socket.recv_from(&mut buffer)
         .map_err(|e| format!("Failed receiving message from the socket: {}", e))?;
     if !check_if_same_source(message_source, *proxy_addr) {
@@ -112,17 +150,24 @@ fn response_to_string(content: Vec<u8>) -> String {
     String::from_utf8_lossy(content.as_slice()).to_string()
 }
 
-fn poll_messages(socket: &UdpSocket, destination: &SocketAddr) -> Vec<u8> {
+/// None means that couldn't
+fn poll_messages(socket: &UdpSocket, destination: &SocketAddr) -> Option<Vec<u8>> {
     let mut received_batches: HashMap<u32, Vec<u8>> = HashMap::new();
     let mut expected_overall_count = 0;
     let mut failures = 0;
-    let mut failures_max = 50;
+    let failures_max = 50;
+    let failures_max_for_first_batch = 10;
 
     loop {
         let current_block_res = wait_for_response_with_attempts(socket, destination);
-        if let Err(e) = current_block_res {
-            // TODO improve the code
+        if let Err(_) = current_block_res {
             failures += 1;
+            if expected_overall_count == 0 {
+                if failures > failures_max_for_first_batch {
+                    return None;
+                }
+                continue;
+            }
             if failures > failures_max {
                 panic!("Couldn't receive the message after {} retries", failures_max);
             }
@@ -159,7 +204,7 @@ fn poll_messages(socket: &UdpSocket, destination: &SocketAddr) -> Vec<u8> {
     for i in 0..expected_overall_count {
         overall_message.extend(received_batches.get(&i).unwrap());
     }
-    overall_message
+    Some(overall_message)
 }
 
 /// The protocol is like this:
