@@ -12,7 +12,7 @@ const REQUEST_PREFIX: &'static str = "GET:";
 const BYE_MESSAGE: &'static str = "BYE";
 const BYE_RESPONSE: &'static str = "BYE";
 const REPEAT_REQUEST_PREFIX: &'static str = "REPEAT_BATCH:";
-const BUFFER_SIZE: usize = 500;
+const BUFFER_SIZE: usize = 1000;
 
 fn main() {
     let app = App::new("UDP Client for the proxy server")
@@ -55,7 +55,7 @@ fn main() {
     let socket = UdpSocket::bind(&possible_addresses[..])
         .expect("Failed to bind to the UDP socket");
     // TODO increase in prod
-    socket.set_read_timeout(Some(Duration::new(5 * 60, 0))).expect("Couldn't set the socket timeout");
+    socket.set_read_timeout(Some(Duration::new(15, 0))).expect("Couldn't set the socket timeout");
 
     let mut connect_attempts = 0;
     loop {
@@ -161,7 +161,8 @@ fn poll_messages(socket: &UdpSocket, destination: &SocketAddr) -> Option<Vec<u8>
 
     loop {
         let current_block_res = wait_for_response_with_attempts(socket, destination);
-        if let Err(_) = current_block_res {
+        if let Err(e) = current_block_res {
+            println!("{}", e);
             failures += 1;
             if expected_overall_count == 0 {
                 if failures > failures_max_for_first_batch {
@@ -194,7 +195,7 @@ fn poll_messages(socket: &UdpSocket, destination: &SocketAddr) -> Option<Vec<u8>
         }
         received_batches.insert(current_index, body.to_vec());
 
-        println!("{} {}", received_batches.len(), overall_count);
+        println!("{} {} {}", current_index, received_batches.len(), overall_count);
         if received_batches.len() == overall_count.try_into().unwrap() {
             break;
         }
