@@ -45,7 +45,7 @@ fn main() {
     let proxy_server_address: SocketAddr = proxy_server_address_raw
         .parse()
         .expect("Couldn't parse the proxy address");
-    let local_ip = [127, 0, 0, 1];
+    let local_ip = [0,0,0,0,];
     let possible_addresses = [
         SocketAddr::from((local_ip, 5000)),
         SocketAddr::from((local_ip, 5001)),
