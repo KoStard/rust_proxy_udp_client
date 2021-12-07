@@ -12,7 +12,7 @@ const REQUEST_PREFIX: &'static str = "GET:";
 const BYE_MESSAGE: &'static str = "BYE";
 const BYE_RESPONSE: &'static str = "BYE";
 const REPEAT_REQUEST_PREFIX: &'static str = "REPEAT_BATCH:";
-const BUFFER_SIZE: usize = 10_000;
+const BUFFER_SIZE: usize = 500;
 
 fn main() {
     let app = App::new("UDP Client for the proxy server")
@@ -55,7 +55,7 @@ fn main() {
     let socket = UdpSocket::bind(&possible_addresses[..])
         .expect("Failed to bind to the UDP socket");
     // TODO increase in prod
-    socket.set_read_timeout(Some(Duration::new(5, 0))).expect("Couldn't set the socket timeout");
+    socket.set_read_timeout(Some(Duration::new(5 * 60, 0))).expect("Couldn't set the socket timeout");
 
     let mut connect_attempts = 0;
     loop {
@@ -133,6 +133,7 @@ fn wait_for_response<'a>(socket: &'a UdpSocket, proxy_addr: &'a SocketAddr) -> R
     let mut buffer = [0; BUFFER_SIZE];
     let (msg_length, message_source) = socket.recv_from(&mut buffer)
         .map_err(|e| format!("Failed receiving message from the socket: {}", e))?;
+    println!("The message length was {}", msg_length);
     if !check_if_same_source(message_source, *proxy_addr) {
         println!("Received message not from the proxy {} {}", message_source, proxy_addr);
         Ok(None)
